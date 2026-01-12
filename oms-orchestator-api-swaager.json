@@ -1,0 +1,2261 @@
+openapi: 3.0.3
+info:
+  title: DPW OMS Orchestrator API
+  description: |
+    Orchestration service handling business workflows, validations, and aggregations.
+    
+    ## Service Responsibilities
+    - Create, Update, Delete operations with validation
+    - Multi-step business process orchestration
+    - External system integrations (INTTRA, WMS, Carriers)
+    - Document generation and distribution
+    - Bulk upload and batch processing
+    - Email and notification workflows
+    - Data aggregation from multiple services
+    
+    ## Architecture Pattern
+    **UI → Orchestrator → Core API**
+    - UI calls Orchestrator for all operations
+    - Orchestrator validates, aggregates, and orchestrates workflows
+    - Orchestrator calls Core API for data operations
+    - Orchestrator integrates with external systems
+    
+  version: 1.0.0
+  contact:
+    name: DP World OMS Team
+    email: oms-support@dpworld.com
+
+servers:
+  - url: https://api.dpworld.com/oms/orchestrator/v1
+    description: Production
+  - url: https://api-staging.dpworld.com/oms/orchestrator/v1
+    description: Staging
+  - url: https://api-dev.dpworld.com/oms/orchestrator/v1
+    description: Development
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Quotations
+    description: Quotation lifecycle management and workflows
+  - name: Orders
+    description: Order lifecycle management and workflows
+  - name: Claims
+    description: Claims lifecycle management and workflows
+  - name: Bulk Operations
+    description: Bulk upload and batch processing
+  - name: Documents
+    description: Document generation and management
+  - name: Finance Integration
+    description: External finance system integration
+  - name: Async Operations
+    description: Long-running operation status tracking
+
+paths:
+  # ============================================================================
+  # QUOTATIONS - Create, Update, Delete & Workflows
+  # ============================================================================
+
+  /businessUnits/{buId}/quotations:
+    post:
+      tags: [Quotations]
+      summary: Create quotation
+      description: |
+        Creates a new quotation with validation and aggregation.
+        
+        **Orchestration Flow**:
+        1. Validate customer and business unit
+        2. Validate product SKUs and pricing
+        3. Calculate totals and taxes
+        4. Create quotation in Core API
+        5. Trigger any configured workflows
+      operationId: createQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuotationRequest'
+      responses:
+        '201':
+          description: Quotation created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of created quotation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}:
+    put:
+      tags: [Quotations]
+      summary: Update quotation
+      description: Partial update of quotation fields (DRAFT status only)
+      operationId: updateQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchQuotationRequest'
+      responses:
+        '200':
+          description: Quotation updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      tags: [Quotations]
+      summary: Delete quotation
+      description: Soft delete quotation (DRAFT status only)
+      operationId: deleteQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteQuotationRequest'
+      responses:
+        '204':
+          description: Quotation deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/status:
+    patch:
+      tags: [Quotations]
+      summary: Update quotation status
+      description: |
+        Transition quotation to new status with validation.
+        
+        **Status Transitions**:
+        - DRAFT → PENDING
+        - PENDING → ACCEPTED
+        - PENDING → EXPIRED
+        - ACCEPTED → PAID
+        - PAID → CONVERTED
+        - DRAFT/PENDING/ACCEPTED → CANCELLED
+      operationId: updateQuotationStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [DRAFT, SENT, ACCEPTED, EXPIRED, CANCELLED]
+                reason:
+                  type: string
+                  maxLength: 500
+                comments:
+                  type: string
+                  maxLength: 2000
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/send:
+    post:
+      tags: [Quotations]
+      summary: Send quotation to customer
+      description: |
+        Generates quotation PDF and sends via email.
+        
+        **Workflow Steps**:
+        1. Generate PDF document
+        2. Send email via Notification Service
+        3. Record sentDate timestamp
+      operationId: sendQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                emailAddresses:
+                  type: array
+                  description: Additional recipient email addresses
+                  items:
+                    type: string
+                    format: email
+                  maxItems: 10
+                comments:
+                  type: string
+                  description: Additional email message content
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Quotation sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowSuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/convert-to-order:
+    post:
+      tags: [Quotations]
+      summary: Convert quotation to order
+      description: |
+        Converts ACCEPTED quotation to sales order.
+        
+        **Workflow Steps**:
+        1. Validate quotation is in PAID status
+        2. Create order via order creation endpoint
+        3. Copy quotation lines to order lines
+        4. Link order to quotation
+        5. Optionally trigger fulfillment allocation
+        6. Send confirmation email
+      operationId: convertQuotationToOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orderType:
+                  type: string
+                  enum: [STANDARD, EXPRESS, DROPSHIP]
+                  default: STANDARD
+                requestedDeliveryDate:
+                  type: string
+                  format: date
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '201':
+          description: Order created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertToOrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/download:
+    get:
+      tags: [Quotations]
+      summary: Generate and download quotation PDF
+      description: Generates PDF document and returns binary stream
+      operationId: downloadQuotationPdf
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - name: locale
+          in: query
+          description: Document locale for formatting
+          schema:
+            type: string
+            default: en-US
+      responses:
+        '200':
+          description: PDF generated successfully
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: 'attachment; filename="quotation-{quotationId}.pdf"'
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # ORDERS - Create, Update, Delete & Workflows
+  # ============================================================================
+  
+  /businessUnits/{buId}/orders:
+    post:
+      tags: [Orders]
+      summary: Create order
+      description: |
+        Creates a new sales order with validation and aggregation.
+        
+        **Orchestration Flow**:
+        1. Validate customer and business unit
+        2. Validate product availability
+        3. Calculate pricing and totals
+        4. Check credit limits
+        5. Create order in Core API
+        6. Trigger fulfillment workflows if needed
+      operationId: createOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Order created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}:
+    put:
+      tags: [Orders]
+      summary: Replace order
+      description: Full replacement of order (before processing)
+      operationId: replaceOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderRequest'
+      responses:
+        '200':
+          description: Order replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    patch:
+      tags: [Orders]
+      summary: Update order
+      description: Partial update of order fields
+      operationId: updateOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchOrderRequest'
+      responses:
+        '200':
+          description: Order updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      tags: [Orders]
+      summary: Cancel order
+      description: Cancels order (soft delete)
+      operationId: cancelOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cancelReason]
+              properties:
+                cancelReason:
+                  type: string
+                  minLength: 10
+                  maxLength: 500
+      responses:
+        '204':
+          description: Order cancelled successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/release:
+    post:
+      tags: [Orders]
+      summary: Release order hold
+      description: Releases order from on-hold status
+      operationId: releaseOrderHold
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comments:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Order released successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/release-exception:
+    post:
+      tags: [Orders]
+      summary: Release order exception
+      description: Clears exception flag and releases order
+      operationId: releaseOrderException
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolution:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Exception released successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/copy:
+    post:
+      tags: [Orders]
+      summary: Copy order
+      operationId: copyOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '201':
+          description: Order copied successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/drafts:
+    post:
+      tags: [Orders]
+      summary: Create order draft
+      description: Creates order draft for later completion
+      operationId: createOrderDraft
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Draft created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/recalculate-prices:
+    post:
+      tags: [Orders]
+      summary: Recalculate order pricing
+      description: |
+        Recalculates order line prices via Pricing Service integration.
+        
+        **Integration Points**:
+        - Pricing Engine API
+        - Tax Calculation Service
+        - OMS Core API (update)
+      operationId: recalculateOrderPrices
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                priceListId:
+                  type: string
+                effectiveDate:
+                  type: string
+                  format: date
+                recalculateTax:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: Prices recalculated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecalculatePricesResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/recalculate-totals:
+    post:
+      tags: [Orders]
+      summary: Recalculate order totals
+      description: Recalculates aggregate totals including discounts and taxes
+      operationId: recalculateOrderTotals
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Totals recalculated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecalculateTotalsResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # CLAIMS - Create, Update, Delete & Workflows
+  # ============================================================================
+  
+  /businessUnits/{buId}/claims:
+    post:
+      tags: [Claims]
+      summary: Create claim
+      description: |
+        Creates a new claim with validation.
+        
+        **Orchestration Flow**:
+        1. Validate customer and order reference
+        2. Validate claim items
+        3. Calculate claim amounts
+        4. Create claim in Core API
+        5. Initiate claim workflow
+      operationId: createClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateClaimRequest'
+      responses:
+        '201':
+          description: Claim created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}:
+    patch:
+      tags: [Claims]
+      summary: Update claim
+      operationId: updateClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchClaimRequest'
+      responses:
+        '200':
+          description: Claim updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/status:
+    patch:
+      tags: [Claims]
+      summary: Update claim status
+      operationId: updateClaimStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED, COMPLETED, CANCELLED]
+                comments:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/items:
+    post:
+      tags: [Claims]
+      summary: Add claim item
+      operationId: addClaimItem
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateClaimItemRequest'
+      responses:
+        '201':
+          description: Item added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimItemResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/remarks:
+    post:
+      tags: [Claims]
+      summary: Add claim remark
+      operationId: addClaimRemark
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [remark]
+              properties:
+                remark:
+                  type: string
+                  maxLength: 2000
+                remarkType:
+                  type: string
+                  enum: [INTERNAL, CUSTOMER_FACING]
+                  default: INTERNAL
+      responses:
+        '201':
+          description: Remark added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/grv:
+    post:
+      tags: [Claims]
+      summary: Create GRV document
+      description: |
+        Generates Goods Return Voucher (GRV) document.
+        
+        **Workflow Steps**:
+        1. Validate claim status
+        2. Generate GRV document
+        3. Store in document management system
+        4. Update claim with GRV reference
+        5. Send notification
+      operationId: createClaimGrv
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                warehouseCode:
+                  type: string
+                expectedReturnDate:
+                  type: string
+                  format: date
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '201':
+          description: GRV created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrvResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/quality-check:
+    post:
+      tags: [Claims]
+      summary: Initiate quality check
+      description: |
+        Starts quality check workflow for returned items.
+        
+        **Integration**: Warehouse Management System (WMS)
+      operationId: initiateClaimQualityCheck
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inspectorId, scheduledDate]
+              properties:
+                inspectorId:
+                  type: string
+                scheduledDate:
+                  type: string
+                  format: date-time
+                inspectionLocation:
+                  type: string
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Quality check initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityCheckResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    patch:
+      tags: [Claims]
+      summary: Update quality check results
+      operationId: updateClaimQualityCheck
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [qcStatus]
+              properties:
+                qcStatus:
+                  type: string
+                  enum: [PASSED, FAILED, PARTIAL]
+                findings:
+                  type: string
+                  maxLength: 2000
+                approvedQuantity:
+                  type: number
+                  format: decimal
+                rejectedQuantity:
+                  type: number
+                  format: decimal
+                attachments:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Quality check updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityCheckResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/assign-trip:
+    post:
+      tags: [Claims]
+      summary: Assign claim to trip
+      description: Assigns claim to delivery/pickup trip (TMS integration)
+      operationId: assignClaimToTrip
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tripId]
+              properties:
+                tripId:
+                  type: string
+                pickupDate:
+                  type: string
+                  format: date
+                notes:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Trip assigned successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripAssignmentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/approve:
+    post:
+      tags: [Claims]
+      summary: Approve claim
+      description: |
+        Initiates claim approval workflow.
+        
+        **Workflow Steps**:
+        1. Validate approval authority
+        2. Update claim status to APPROVED
+        3. Trigger accounting clearance
+        4. Send notification to stakeholders
+      operationId: approveClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approvalDecision]
+              properties:
+                approvalDecision:
+                  type: string
+                  enum: [APPROVED, REJECTED, CONDITIONALLY_APPROVED]
+                approvedAmount:
+                  type: number
+                  format: decimal
+                approvalComments:
+                  type: string
+                  maxLength: 2000
+                conditions:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Claim approval processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/accounting-clearance:
+    post:
+      tags: [Claims]
+      summary: Process accounting clearance
+      description: Integrates with finance system for accounting clearance
+      operationId: processClaimAccountingClearance
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountingMethod]
+              properties:
+                accountingMethod:
+                  type: string
+                  enum: [CREDIT_NOTE, REFUND, REPLACEMENT]
+                creditNoteNumber:
+                  type: string
+                refundMethod:
+                  type: string
+                  enum: [BANK_TRANSFER, CHEQUE, STORE_CREDIT]
+                bankDetails:
+                  type: object
+                  properties:
+                    accountNumber:
+                      type: string
+                    bankName:
+                      type: string
+                    swiftCode:
+                      type: string
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Accounting clearance initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountingClearanceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/complete:
+    post:
+      tags: [Claims]
+      summary: Complete claim
+      description: Marks claim as completed and closes workflow
+      operationId: completeClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                completionNotes:
+                  type: string
+                  maxLength: 2000
+                customerSatisfactionRating:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+      responses:
+        '200':
+          description: Claim completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowSuccessResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/bulk-actions:
+    post:
+      tags: [Claims]
+      summary: Bulk claim actions
+      description: Perform bulk operations on multiple claims (KAM approval, rejection, etc.)
+      operationId: bulkClaimActions
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [claimIds, action]
+              properties:
+                claimIds:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 1
+                  maxItems: 100
+                action:
+                  type: string
+                  enum: [APPROVE, REJECT, ASSIGN, UPDATE_STATUS]
+                actionParameters:
+                  type: object
+                  additionalProperties: true
+                comments:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '202':
+          description: Bulk action initiated (async)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # BULK OPERATIONS
+  # ============================================================================
+  
+  /businessUnits/{buId}/claims/bulk-upload:
+    post:
+      tags: [Bulk Operations]
+      summary: Bulk upload claims
+      description: |
+        Async bulk upload of claims via CSV/Excel file.
+        
+        **Process**:
+        1. Validate file format
+        2. Queue for async processing
+        3. Return operation ID
+        4. Process records asynchronously
+        5. Generate results file
+      operationId: bulkUploadClaims
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                validateOnly:
+                  type: boolean
+                  default: false
+                notifyOnCompletion:
+                  type: boolean
+                  default: true
+      responses:
+        '202':
+          description: Upload accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/bulk-uploads/{uploadId}:
+    get:
+      tags: [Bulk Operations]
+      summary: Get bulk upload status
+      operationId: getBulkUploadStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkUploadStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/bulk-uploads/{uploadId}/download:
+    get:
+      tags: [Bulk Operations]
+      summary: Download bulk upload results
+      operationId: downloadBulkUploadResults
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Results file downloaded
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/bulk-uploads/templates/{templateType}:
+    get:
+      tags: [Bulk Operations]
+      summary: Download bulk upload template
+      operationId: downloadBulkUploadTemplate
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: templateType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [CLAIMS, ORDERS, PRODUCTS]
+        - $ref: '#/components/parameters/TenantHeader'
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [CSV, XLSX]
+            default: XLSX
+      responses:
+        '200':
+          description: Template downloaded
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # DOCUMENTS
+  # ============================================================================
+  
+  /businessUnits/{buId}/documents/upload:
+    post:
+      tags: [Documents]
+      summary: Upload document
+      operationId: uploadDocument
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                documentType:
+                  type: string
+                  enum: [INVOICE, QUOTATION, CLAIM, PROOF_OF_DELIVERY, OTHER]
+                description:
+                  type: string
+                  maxLength: 500
+                entityType:
+                  type: string
+                  enum: [QUOTATION, ORDER, CLAIM, CUSTOMER]
+                entityId:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  maxItems: 10
+      responses:
+        '201':
+          description: Document uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/documents/{documentId}/download:
+    get:
+      tags: [Documents]
+      summary: Download document
+      operationId: downloadDocument
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Document downloaded
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/documents/{documentId}:
+    delete:
+      tags: [Documents]
+      summary: Delete document
+      operationId: deleteDocument
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '204':
+          description: Document deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # FINANCE INTEGRATION
+  # ============================================================================
+  
+  /businessUnits/{buId}/finance/ar-events:
+    post:
+      tags: [Finance Integration]
+      summary: Receive AR event webhook
+      description: |
+        Webhook endpoint for external finance system AR events.
+        
+        **Event Types**:
+        - INVOICE_CREATED
+        - PAYMENT_RECEIVED
+        - INVOICE_CANCELLED
+        - CREDIT_NOTE_ISSUED
+      operationId: receiveArEvent
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventType, eventId, timestamp, payload]
+              properties:
+                eventType:
+                  type: string
+                  enum: [INVOICE_CREATED, PAYMENT_RECEIVED, INVOICE_CANCELLED, CREDIT_NOTE_ISSUED]
+                eventId:
+                  type: string
+                timestamp:
+                  type: string
+                  format: date-time
+                sourceSystem:
+                  type: string
+                payload:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: Event received and processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookAcknowledgment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/invoices/retry:
+    post:
+      tags: [Finance Integration]
+      summary: Retry failed invoices
+      operationId: retryFailedInvoices
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoiceIds]
+              properties:
+                invoiceIds:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 1
+                  maxItems: 50
+      responses:
+        '202':
+          description: Retry initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # ASYNC OPERATIONS
+  # ============================================================================
+  
+  /businessUnits/{buId}/async-operations/{operationId}:
+    get:
+      tags: [Async Operations]
+      summary: Get async operation status
+      operationId: getAsyncOperationStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      tags: [Async Operations]
+      summary: Cancel async operation
+      operationId: cancelAsyncOperation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowSuccessResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+# ============================================================================
+# COMPONENTS
+# ============================================================================
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    BuId:
+      name: buId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: CCTIC000003
+    
+    QuotationId:
+      name: quotationId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: QT-2025-001
+    
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: ORD-2025-001
+    
+    ClaimId:
+      name: claimId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: CLM-2025-001
+    
+    TenantHeader:
+      name: x-tenant-id
+      in: header
+      required: true
+      schema:
+        type: string
+        example: CCTI
+    
+    CorrelationIdHeader:
+      name: x-correlation-id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # Common reference schemas
+    CustomerReference:
+      type: object
+      required: [customerNumber]
+      properties:
+        customerNumber:
+          type: string
+        customerId:
+          type: string
+          example: CUST-1001
+        branchNumber:
+          type: string
+          example: BR-1001
+        branchId:
+          type: string
+          example: ABC Trading LLC
+        email:
+          type: string
+          format: email
+        phoneNumber:
+          type: string
+        buyingGroupCode:
+          type: string
+        clientGroupCode:
+          type: string
+
+    AddressReference:
+      type: object
+      required: [addressLine1, city, country]
+      properties:
+        addressId:
+          type: string
+        displayName:
+          type: string
+        addressLine1:
+          type: string
+          maxLength: 200
+        addressLine2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        stateProvince:
+          type: string
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        postalCode:
+          type: string
+        email:
+          type: string
+          format: email
+        phoneNumber:
+          type: string
+
+    SalesPersonReference:
+      type: object
+      properties:
+        salesPersonName:
+          type: string
+        salesPersonId:
+          type: string
+
+    PrincipalReference:
+      type: object
+      required: [principal, principalCode, principalId]
+      properties:
+        principal:
+          type: string
+          example: AMKA
+        principalCode:
+          type: string
+          example: PRP-001
+        customerPrincipalCode:
+          type: string
+          example: CUS-PRP-001
+        principalId:
+          type: number
+          example: 1
+
+    PaginationMetadata:
+      type: object
+      required:
+        - page
+        - pageSize
+        - totalItems
+        - totalPages
+        - hasNext
+        - hasPrevious
+      properties:
+        page:
+          type: integer
+          example: 1
+    
+        pageSize:
+          type: integer
+          example: 50
+    
+        totalItems:
+          type: integer
+          example: 527
+    
+        totalPages:
+          type: integer
+          example: 11
+    
+        hasNext:
+          type: boolean
+          example: true
+    
+        hasPrevious:
+          type: boolean
+          example: false
+
+
+    # Request schemas
+    CreateQuotationRequest:
+      type: object
+      required: [documentDate, customer, currencyCode, lines]
+      properties:
+        externalReferenceId:
+          type: string
+          maxLength: 100
+        sourceSystem:
+          type: string
+          enum: [OMS, ERP, MARKETPLACE, PORTAL]
+        documentDate:
+          type: string
+          format: date
+        dueDate:
+          type: string
+          format: date
+        validUntilDate:
+          type: string
+          format: date
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        billToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        shipToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        principal:
+          $ref: '#/components/schemas/PrincipalReference'
+        languageCode:
+          type: string
+          pattern: '^[a-z]{2}$'
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        salesperson:
+          $ref: '#/components/schemas/SalesPersonReference'
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/QuotationLineRequest'
+
+    QuotationLineRequest:
+      type: object
+      required: [sku, unitOfMeasure, quantity, unitPrice]
+      properties:
+        sku:
+          type: string
+          maxLength: 100
+        lineType:
+          type: string
+          enum: [ITEM, RESOURCE, CHARGE]
+          default: ITEM
+        description:
+          type: string
+          maxLength: 500
+        unitOfMeasure:
+          type: string
+          maxLength: 10
+        customerUnitPrice:
+          type: number
+          format: decimal
+          minimum: 0
+        quantity:
+          type: number
+          format: decimal
+          minimum: 0.001
+
+    PatchQuotationRequest:
+      type: object
+      properties:
+        externalReferenceId:
+          type: string
+        dueDate:
+          type: string
+          format: date
+        validUntilDate:
+          type: string
+          format: date
+        salesperson:
+          $ref: '#/components/schemas/SalesPersonReference'
+        lines:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/QuotationLineRequest'
+              - type: object
+                properties:
+                  quotationLineId:
+                    type: string
+                  cancelled:
+                    type: boolean
+
+    DeleteQuotationRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    CreateOrderRequest:
+      type: object
+      required: [orderDate, customer, currencyCode, lines]
+      properties:
+        orderDate:
+          type: string
+          format: date
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        currencyCode:
+          type: string
+        lines:
+          type: array
+          items:
+            type: object
+
+    UpdateOrderRequest:
+      type: object
+      properties:
+        lines:
+          type: array
+          items:
+            type: object
+
+    PatchOrderRequest:
+      type: object
+      properties:
+        requestedDeliveryDate:
+          type: string
+          format: date
+
+    CreateClaimRequest:
+      type: object
+      required: [claimType, customer, claimDate]
+      properties:
+        claimType:
+          type: string
+          enum: [DAMAGE, SHORTAGE, QUALITY, RETURN]
+        claimDate:
+          type: string
+          format: date
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        items:
+          type: array
+          items:
+            type: object
+
+    PatchClaimRequest:
+      type: object
+      properties:
+        description:
+          type: string
+
+    CreateClaimItemRequest:
+      type: object
+      required: [sku, quantity, unitPrice]
+      properties:
+        sku:
+          type: string
+        quantity:
+          type: number
+        unitPrice:
+          type: number
+
+    # Response schemas    
+    QuotationResponse:
+      type: object
+      required:
+        - tenantId
+        - buId
+        - quotationId
+        - documentDate
+        - status
+      properties:
+        tenantId:
+          type: string
+        buId:
+          type: string
+    
+        id:
+          type: integer
+          format: int64
+        quotationId:
+          type: string
+        externalReferenceId:
+          type: string
+    
+        documentDate:
+          type: string
+          format: date
+        dueDate:
+          type: string
+          format: date
+        validUntilDate:
+          type: string
+          format: date
+    
+        status:
+          type: string
+          enum: [DRAFT, SENT, ACCEPTED, EXPIRED, CANCELLED]
+    
+        currencyCode:
+          type: string
+        pricingMethod:
+          type: string
+          enum: [LIST, CONTRACT, MANUAL]
+    
+        customerReference:
+          $ref: '#/components/schemas/CustomerReference'
+    
+        billToAddressReference:
+          $ref: '#/components/schemas/AddressReference'
+        shipToAddressReference:
+          $ref: '#/components/schemas/AddressReference'
+    
+        totalAmountExcludingTax:
+          type: number
+        totalTaxAmount:
+          type: number
+        totalAmountIncludingTax:
+          type: number
+
+        lines:
+          type: object
+          description: Paginated quotation lines
+          required:
+            - items
+            - pagination
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/QuotationLineDetails'
+
+            pagination:
+              $ref: '#/components/schemas/PaginationMetadata'
+
+    QuotationLineDetails:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        quotationLineId:
+          type: string
+        sequence:
+          type: integer
+
+        skuId:
+          type: string
+        description:
+          type: string
+        quantity:
+          type: number
+        unitPrice:
+          type: number
+
+        taxReference:
+          $ref: '#/components/schemas/TaxReference'
+
+        principalReference:
+          $ref: '#/components/schemas/PrincipalReference'
+
+        priceListId:
+          type: string
+
+        amountExcludingTax:
+          type: number
+        totalTaxAmount:
+          type: number
+        amountIncludingTax:
+          type: number
+
+    TaxReference:
+      type: object
+      properties:
+        taxId:
+          type: string
+        taxCode:
+          type: string
+
+
+    
+
+    OrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        status:
+          type: string
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+
+    ClaimResponse:
+      type: object
+      properties:
+        claimId:
+          type: string
+        status:
+          type: string
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+
+    ClaimItemResponse:
+      type: object
+      properties:
+        claimItemId:
+          type: string
+        sku:
+          type: string
+        quantity:
+          type: number
+
+    WorkflowSuccessResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        workflowId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    ConvertToOrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        quotationId:
+          type: string
+        status:
+          type: string
+
+    RecalculatePricesResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        linesUpdated:
+          type: integer
+
+    RecalculateTotalsResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        totalAmount:
+          type: number
+
+    GrvResponse:
+      type: object
+      properties:
+        grvId:
+          type: string
+        grvNumber:
+          type: string
+        status:
+          type: string
+
+    QualityCheckResponse:
+      type: object
+      properties:
+        qcId:
+          type: string
+        qcStatus:
+          type: string
+
+    TripAssignmentResponse:
+      type: object
+      properties:
+        tripId:
+          type: string
+        status:
+          type: string
+
+    ApprovalResponse:
+      type: object
+      properties:
+        claimId:
+          type: string
+        approvalDecision:
+          type: string
+
+    AccountingClearanceResponse:
+      type: object
+      properties:
+        claimId:
+          type: string
+        clearanceStatus:
+          type: string
+
+    BulkUploadResponse:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        status:
+          type: string
+
+    BulkUploadStatusResponse:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        status:
+          type: string
+        totalRecords:
+          type: integer
+        processedRecords:
+          type: integer
+
+    DocumentUploadResponse:
+      type: object
+      properties:
+        documentId:
+          type: string
+        fileName:
+          type: string
+
+    AsyncOperationResponse:
+      type: object
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+
+    AsyncOperationStatusResponse:
+      type: object
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+
+    WebhookAcknowledgment:
+      type: object
+      properties:
+        eventId:
+          type: string
+        status:
+          type: string
+
+    StatusUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        status:
+          type: string
+
+    SuccessResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: integer
+        error:
+          type: string
+        message:
+          type: string
+
+    ValidationErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            errors:
+              type: array
+              items:
+                type: object
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    ValidationError:
+      description: Validation Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+    
+    InternalServerError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
