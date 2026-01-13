@@ -1,0 +1,3692 @@
+openapi: 3.0.3
+info:
+  title: DPW OMS Orchestrator API
+  description: |
+    Orchestration service handling business workflows, validations, and aggregations.
+    
+    ## Service Responsibilities
+    - Create, Update, Delete operations with validation
+    - Multi-step business process orchestration
+    - External system integrations (INTTRA, WMS, Carriers)
+    - Document generation and distribution
+    - Bulk upload and batch processing
+    - Email and notification workflows
+    - Data aggregation from multiple services
+    
+    ## Architecture Pattern
+    **UI → Orchestrator → Core API**
+    - UI calls Orchestrator for all operations
+    - Orchestrator validates, aggregates, and orchestrates workflows
+    - Orchestrator calls Core API for data operations
+    - Orchestrator integrates with external systems
+    
+  version: 1.0.0
+  contact:
+    name: DP World OMS Team
+    email: oms-support@dpworld.com
+
+servers:
+  - url: https://api.dpworld.com/oms/orchestrator/v1
+    description: Production
+  - url: https://api-staging.dpworld.com/oms/orchestrator/v1
+    description: Staging
+  - url: https://api-dev.dpworld.com/oms/orchestrator/v1
+    description: Development
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Quotations
+    description: Quotation lifecycle management and workflows
+  - name: Orders
+    description: Order lifecycle management and workflows
+  - name: Claims
+    description: Claims lifecycle management and workflows
+  - name: Bulk Operations
+    description: Bulk upload and batch processing
+  - name: Documents
+    description: Document generation and management
+  - name: Finance Integration
+    description: External finance system integration
+  - name: Async Operations
+    description: Long-running operation status tracking
+
+paths:
+  # ============================================================================
+  # QUOTATIONS - Create, Update, Delete & Workflows
+  # ============================================================================
+
+  /businessUnits/{buId}/quotations:
+    post:
+      tags: [Quotations]
+      summary: Create quotation
+      description: |
+        Creates a new quotation with validation and aggregation.
+        
+        **Orchestration Flow**:
+        1. Validate customer and business unit
+        2. Validate product SKUs and pricing
+        3. Calculate totals and taxes
+        4. Create quotation in Core API
+        5. Trigger any configured workflows
+      operationId: createQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuotationRequest'
+      responses:
+        '201':
+          description: Quotation created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of created quotation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}:
+    put:
+      tags: [Quotations]
+      summary: Update quotation
+      description: Partial update of quotation fields (DRAFT status only)
+      operationId: updateQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchQuotationRequest'
+      responses:
+        '200':
+          description: Quotation updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      tags: [Quotations]
+      summary: Delete quotation
+      description: Soft delete quotation (DRAFT status only)
+      operationId: deleteQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteQuotationRequest'
+      responses:
+        '204':
+          description: Quotation deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/status:
+    patch:
+      tags: [Quotations]
+      summary: Update quotation status
+      description: |
+        Transition quotation to new status with validation.
+        
+        **Status Transitions**:
+        - DRAFT → PENDING
+        - PENDING → ACCEPTED
+        - PENDING → EXPIRED
+        - ACCEPTED → PAID
+        - PAID → CONVERTED
+        - DRAFT/PENDING/ACCEPTED → CANCELLED
+      operationId: updateQuotationStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [DRAFT, SENT, ACCEPTED, EXPIRED, CANCELLED]
+                reason:
+                  type: string
+                  maxLength: 500
+                comments:
+                  type: string
+                  maxLength: 2000
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/send:
+    post:
+      tags: [Quotations]
+      summary: Send quotation to customer
+      description: |
+        Generates quotation PDF and sends via email.
+        
+        **Workflow Steps**:
+        1. Generate PDF document
+        2. Send email via Notification Service
+        3. Record sentDate timestamp
+      operationId: sendQuotation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                emailAddresses:
+                  type: array
+                  description: Additional recipient email addresses
+                  items:
+                    type: string
+                    format: email
+                  maxItems: 10
+                comments:
+                  type: string
+                  description: Additional email message content
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Quotation sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowSuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/convert-to-order:
+    post:
+      tags: [Quotations]
+      summary: Convert quotation to order
+      description: |
+        Converts ACCEPTED quotation to sales order.
+        
+        **Workflow Steps**:
+        1. Validate quotation is in PAID status
+        2. Create order via order creation endpoint
+        3. Copy quotation lines to order lines
+        4. Link order to quotation
+        5. Optionally trigger fulfillment allocation
+        6. Send confirmation email
+      operationId: convertQuotationToOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orderType:
+                  type: string
+                  enum: [STANDARD, EXPRESS, DROPSHIP]
+                  default: STANDARD
+                requestedDeliveryDate:
+                  type: string
+                  format: date
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '201':
+          description: Order created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertToOrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/quotations/{quotationId}/download:
+    get:
+      tags: [Quotations]
+      summary: Generate and download quotation PDF
+      description: Generates PDF document and returns binary stream
+      operationId: downloadQuotationPdf
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - name: locale
+          in: query
+          description: Document locale for formatting
+          schema:
+            type: string
+            default: en-US
+      responses:
+        '200':
+          description: PDF generated successfully
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: 'attachment; filename="quotation-{quotationId}.pdf"'
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # ORDERS - Create, Update, Delete & Workflows
+  # ============================================================================
+  
+  /businessUnits/{buId}/orders:
+    post:
+      tags: [Orders]
+      summary: Create order
+      description: |
+        Creates a new sales order with validation and aggregation.
+        
+        **Orchestration Flow**:
+        1. Validate customer and business unit
+        2. Validate product availability
+        3. Calculate pricing and totals
+        4. Create order in Core API
+        5. Trigger fulfillment workflows if needed
+      operationId: createOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Order created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}:
+    delete:
+      tags: [Orders]
+      summary: Cancel order
+      description: Cancels order (soft delete)
+      operationId: cancelOrder
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 500
+      responses:
+        '204':
+          description: Order cancelled successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/release:
+    post:
+      tags: [Orders]
+      summary: Release order from on hold/ exception 
+      description: Releases order from on-hold status and exception status
+      operationId: releaseOrderHold
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comments:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Order released successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/drafts:
+    post:
+      tags: [Orders]
+      summary: Create  draft order
+      description: Creates order draft for later completion
+      operationId: createOrderDraft
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Draft created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/calculate-prices:
+    post:
+      tags: [Orders]
+      summary: Calculate order pricing for UI
+      description: |
+        Calculates order line prices via Pricing / Deals/ TAX Service integration.
+        
+        **Integration Points**:
+        - Pricing Engine API
+        - Tax Calculation Service
+      operationId: calculateOrderPrices
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderDate, customer, currencyCode, lines]
+              properties:
+                customer:
+                  $ref: '#/components/schemas/CustomerReference'
+                sourceSystem:
+                  type: string
+                  enum: [OMS, ERP, MARKETPLACE, PORTAL]
+                orderType:
+                  type: string
+                  maxLength: 100
+                orderSubType:
+                  type: string
+                  maxLength: 100
+                sourceId:
+                  type: string
+                  enum: [SHOPIFY, BASE_LINKER]
+                channel:
+                  type: string
+                  enum: [TOP, SCS, SFS, API]
+                platform:
+                  #Integration can be baselinker but order is from amazon platform
+                  type: string
+                  enum: [AMAZON, SCS, SFS, API]
+                principal:
+                  $ref: '#/components/schemas/PrincipalReference'
+                warehouse:
+                  $ref: '#/components/schemas/WarehouseReference'
+                currencyCode:
+                  type: string
+                  pattern: '^[A-Z]{3}$'
+                lines:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: '#/components/schemas/OrderLineRequest'
+                
+      responses:
+        '200':
+          description: Prices recalculated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecalculatePricesResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/orders/{orderId}/calculate-prices:
+    post:
+      tags: [Orders]
+      summary: Calculate prices for order
+      description: Calculates aggregate totals including discounts and taxes
+      operationId: RecalculateOrderPrices
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Totals recalculated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecalculateTotalsResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # Quotation-CORE - GET  Workflows
+  # ============================================================================
+  
+  /core/businessUnits/{buId}/quotations/{quotationId}:
+    get:
+      tags: [Quotations-Core]
+      summary: Get Quotation by Id
+      description: |
+        Gets Quotations by Id.
+        
+        **Core Flow**:
+        1. Core get api for quotation
+      operationId: getQuotationById
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '201':
+          description: Claim created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationDetailsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /core/businessUnits/{buId}/quotation-lines/{quotationId}:
+    get:
+      tags: [Quotations-Core]
+      summary: Get Quotation lines by quotationId
+      description: |
+        Gets order by Id.
+        
+        **Core Flow**:
+        1. Core get api for order
+      operationId: getQuotationLinesById
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/QuotationId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        
+      responses:
+        '201':
+          description: Claim created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationLinesDetailsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /core/businessUnits/{buId}/quotations/search:
+    post:
+      tags: [Quotations-Core]
+      summary: Search Quotations
+      operationId: searchQuotations
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuotationSearchRequest'
+      responses:
+        '200':
+          description: Quotations retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotationSearchResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # ORDER-CORE - GET  Workflows
+  # ============================================================================
+  
+  /core/businessUnits/{buId}/orders/{orderId}:
+    get:
+      tags: [Orders-Core]
+      summary: Get Order by Id
+      description: |
+        Gets order by Id.
+        
+        **Core Flow**:
+        1. Core get api for order
+      operationId: getOrderById
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '201':
+          description: Claim created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderDetailsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /core/businessUnits/{buId}/order-lines/{orderId}:
+    get:
+      tags: [Orders-Core]
+      summary: Get Order by Id
+      description: |
+        Gets order by Id.
+        
+        **Core Flow**:
+        1. Core get api for order
+      operationId: getOrderLinesById
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        
+      responses:
+        '201':
+          description: Claim created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderLinesDetailsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /core/businessUnits/{buId}/orders/search:
+    post:
+      tags: [Orders-Core]
+      summary: Search orders
+      operationId: searchOrders
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderSearchRequest'
+      responses:
+        '200':
+          description: Orders retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderSearchResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
+  # ============================================================================
+  # CLAIMS - Create, Update, Delete & Workflows
+  # ============================================================================
+  
+  /businessUnits/{buId}/claims:
+    post:
+      tags: [Claims]
+      summary: Create claim
+      description: |
+        Creates a new claim with validation.
+        
+        **Orchestration Flow**:
+        1. Validate customer and order reference
+        2. Validate claim items
+        3. Calculate claim amounts
+        4. Create claim in Core API
+        5. Initiate claim workflow
+      operationId: createClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateClaimRequest'
+      responses:
+        '201':
+          description: Claim created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}:
+    patch:
+      tags: [Claims]
+      summary: Update claim
+      operationId: updateClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchClaimRequest'
+      responses:
+        '200':
+          description: Claim updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/status:
+    patch:
+      tags: [Claims]
+      summary: Update claim status
+      operationId: updateClaimStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED, COMPLETED, CANCELLED]
+                comments:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/items:
+    post:
+      tags: [Claims]
+      summary: Add claim item
+      operationId: addClaimItem
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateClaimItemRequest'
+      responses:
+        '201':
+          description: Item added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimItemResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/remarks:
+    post:
+      tags: [Claims]
+      summary: Add claim remark
+      operationId: addClaimRemark
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [remark]
+              properties:
+                remark:
+                  type: string
+                  maxLength: 2000
+                remarkType:
+                  type: string
+                  enum: [INTERNAL, CUSTOMER_FACING]
+                  default: INTERNAL
+      responses:
+        '201':
+          description: Remark added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/grv:
+    post:
+      tags: [Claims]
+      summary: Create GRV document
+      description: |
+        Generates Goods Return Voucher (GRV) document.
+        
+        **Workflow Steps**:
+        1. Validate claim status
+        2. Generate GRV document
+        3. Store in document management system
+        4. Update claim with GRV reference
+        5. Send notification
+      operationId: createClaimGrv
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                warehouseCode:
+                  type: string
+                expectedReturnDate:
+                  type: string
+                  format: date
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '201':
+          description: GRV created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrvResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/quality-check:
+    post:
+      tags: [Claims]
+      summary: Initiate quality check
+      description: |
+        Starts quality check workflow for returned items.
+        
+        **Integration**: Warehouse Management System (WMS)
+      operationId: initiateClaimQualityCheck
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inspectorId, scheduledDate]
+              properties:
+                inspectorId:
+                  type: string
+                scheduledDate:
+                  type: string
+                  format: date-time
+                inspectionLocation:
+                  type: string
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Quality check initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityCheckResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    patch:
+      tags: [Claims]
+      summary: Update quality check results
+      operationId: updateClaimQualityCheck
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [qcStatus]
+              properties:
+                qcStatus:
+                  type: string
+                  enum: [PASSED, FAILED, PARTIAL]
+                findings:
+                  type: string
+                  maxLength: 2000
+                approvedQuantity:
+                  type: number
+                  format: decimal
+                rejectedQuantity:
+                  type: number
+                  format: decimal
+                attachments:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Quality check updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityCheckResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/assign-trip:
+    post:
+      tags: [Claims]
+      summary: Assign claim to trip
+      description: Assigns claim to delivery/pickup trip (TMS integration)
+      operationId: assignClaimToTrip
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tripId]
+              properties:
+                tripId:
+                  type: string
+                pickupDate:
+                  type: string
+                  format: date
+                notes:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Trip assigned successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripAssignmentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/approve:
+    post:
+      tags: [Claims]
+      summary: Approve claim
+      description: |
+        Initiates claim approval workflow.
+        
+        **Workflow Steps**:
+        1. Validate approval authority
+        2. Update claim status to APPROVED
+        3. Trigger accounting clearance
+        4. Send notification to stakeholders
+      operationId: approveClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approvalDecision]
+              properties:
+                approvalDecision:
+                  type: string
+                  enum: [APPROVED, REJECTED, CONDITIONALLY_APPROVED]
+                approvedAmount:
+                  type: number
+                  format: decimal
+                approvalComments:
+                  type: string
+                  maxLength: 2000
+                conditions:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Claim approval processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/accounting-clearance:
+    post:
+      tags: [Claims]
+      summary: Process accounting clearance
+      description: Integrates with finance system for accounting clearance
+      operationId: processClaimAccountingClearance
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountingMethod]
+              properties:
+                accountingMethod:
+                  type: string
+                  enum: [CREDIT_NOTE, REFUND, REPLACEMENT]
+                creditNoteNumber:
+                  type: string
+                refundMethod:
+                  type: string
+                  enum: [BANK_TRANSFER, CHEQUE, STORE_CREDIT]
+                bankDetails:
+                  type: object
+                  properties:
+                    accountNumber:
+                      type: string
+                    bankName:
+                      type: string
+                    swiftCode:
+                      type: string
+                notes:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Accounting clearance initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountingClearanceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/{claimId}/complete:
+    post:
+      tags: [Claims]
+      summary: Complete claim
+      description: Marks claim as completed and closes workflow
+      operationId: completeClaim
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/ClaimId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                completionNotes:
+                  type: string
+                  maxLength: 2000
+                customerSatisfactionRating:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+      responses:
+        '200':
+          description: Claim completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowSuccessResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/claims/bulk-actions:
+    post:
+      tags: [Claims]
+      summary: Bulk claim actions
+      description: Perform bulk operations on multiple claims (KAM approval, rejection, etc.)
+      operationId: bulkClaimActions
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [claimIds, action]
+              properties:
+                claimIds:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 1
+                  maxItems: 100
+                action:
+                  type: string
+                  enum: [APPROVE, REJECT, ASSIGN, UPDATE_STATUS]
+                actionParameters:
+                  type: object
+                  additionalProperties: true
+                comments:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '202':
+          description: Bulk action initiated (async)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # BULK OPERATIONS
+  # ============================================================================
+  
+  /businessUnits/{buId}/claims/bulk-upload:
+    post:
+      tags: [Bulk Operations]
+      summary: Bulk upload claims
+      description: |
+        Async bulk upload of claims via CSV/Excel file.
+        
+        **Process**:
+        1. Validate file format
+        2. Queue for async processing
+        3. Return operation ID
+        4. Process records asynchronously
+        5. Generate results file
+      operationId: bulkUploadClaims
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                validateOnly:
+                  type: boolean
+                  default: false
+                notifyOnCompletion:
+                  type: boolean
+                  default: true
+      responses:
+        '202':
+          description: Upload accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/bulk-uploads/{uploadId}:
+    get:
+      tags: [Bulk Operations]
+      summary: Get bulk upload status
+      operationId: getBulkUploadStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkUploadStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/bulk-uploads/{uploadId}/download:
+    get:
+      tags: [Bulk Operations]
+      summary: Download bulk upload results
+      operationId: downloadBulkUploadResults
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Results file downloaded
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/bulk-uploads/templates/{templateType}:
+    get:
+      tags: [Bulk Operations]
+      summary: Download bulk upload template
+      operationId: downloadBulkUploadTemplate
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: templateType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [CLAIMS, ORDERS, PRODUCTS]
+        - $ref: '#/components/parameters/TenantHeader'
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [CSV, XLSX]
+            default: XLSX
+      responses:
+        '200':
+          description: Template downloaded
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # DOCUMENTS
+  # ============================================================================
+  
+  /businessUnits/{buId}/documents/upload:
+    post:
+      tags: [Documents]
+      summary: Upload document
+      operationId: uploadDocument
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                documentType:
+                  type: string
+                  enum: [INVOICE, QUOTATION, CLAIM, PROOF_OF_DELIVERY, OTHER]
+                description:
+                  type: string
+                  maxLength: 500
+                entityType:
+                  type: string
+                  enum: [QUOTATION, ORDER, CLAIM, CUSTOMER]
+                entityId:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  maxItems: 10
+      responses:
+        '201':
+          description: Document uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/documents/{documentId}/download:
+    get:
+      tags: [Documents]
+      summary: Download document
+      operationId: downloadDocument
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Document downloaded
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/documents/{documentId}:
+    delete:
+      tags: [Documents]
+      summary: Delete document
+      operationId: deleteDocument
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '204':
+          description: Document deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # FINANCE INTEGRATION
+  # ============================================================================
+  
+  /businessUnits/{buId}/finance/ar-events:
+    post:
+      tags: [Finance Integration]
+      summary: Receive AR event webhook
+      description: |
+        Webhook endpoint for external finance system AR events.
+        
+        **Event Types**:
+        - INVOICE_CREATED
+        - PAYMENT_RECEIVED
+        - INVOICE_CANCELLED
+        - CREDIT_NOTE_ISSUED
+      operationId: receiveArEvent
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventType, eventId, timestamp, payload]
+              properties:
+                eventType:
+                  type: string
+                  enum: [INVOICE_CREATED, PAYMENT_RECEIVED, INVOICE_CANCELLED, CREDIT_NOTE_ISSUED]
+                eventId:
+                  type: string
+                timestamp:
+                  type: string
+                  format: date-time
+                sourceSystem:
+                  type: string
+                payload:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: Event received and processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookAcknowledgment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /businessUnits/{buId}/invoices/retry:
+    post:
+      tags: [Finance Integration]
+      summary: Retry failed invoices
+      operationId: retryFailedInvoices
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoiceIds]
+              properties:
+                invoiceIds:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 1
+                  maxItems: 50
+      responses:
+        '202':
+          description: Retry initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ============================================================================
+  # ASYNC OPERATIONS
+  # ============================================================================
+  
+  /businessUnits/{buId}/async-operations/{operationId}:
+    get:
+      tags: [Async Operations]
+      summary: Get async operation status
+      operationId: getAsyncOperationStatus
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      tags: [Async Operations]
+      summary: Cancel async operation
+      operationId: cancelAsyncOperation
+      parameters:
+        - $ref: '#/components/parameters/BuId'
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowSuccessResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+# ============================================================================
+# COMPONENTS
+# ============================================================================
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    BuId:
+      name: buId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: CCTIC000003
+    
+    QuotationId:
+      name: quotationId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: QT-2025-001
+    
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: ORD-2025-001
+    
+    ClaimId:
+      name: claimId
+      in: path
+      required: true
+      schema:
+        type: string
+        example: CLM-2025-001
+    
+    TenantHeader:
+      name: x-tenant-id
+      in: header
+      required: true
+      schema:
+        type: string
+        example: CCTI
+    
+    CorrelationIdHeader:
+      name: x-correlation-id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+    PageParam:
+      name: page
+      in: query
+      description: Page number (0-indexed)
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    
+    SizeParam:
+      name: size
+      in: query
+      description: Page size
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  schemas:
+    # Common reference schemas
+    CustomerReference:
+      type: object
+      required: [customerNumber, customerId, branchNumber, branchId]
+      properties:
+        customerNumber:
+          type: string
+        customerId:
+          type: string
+          example: CUST-1001
+        branchNumber:
+          type: string
+          example: BR-1001
+        branchId:
+          type: string
+          example: ABC Trading LLC
+        email:
+          type: string
+          format: email
+        phoneNumber:
+          type: string
+        buyingGroupCode:
+          type: string
+        clientGroupCode:
+          type: string
+
+    AddressReference:
+      type: object
+      required: [addressLine1, city, country]
+      properties:
+        addressId:
+          type: string
+        displayName:
+          type: string
+        addressLine1:
+          type: string
+          maxLength: 200
+        addressLine2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        stateProvince:
+          type: string
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        postalCode:
+          type: string
+        email:
+          type: string
+          format: email
+        phoneNumber:
+          type: string
+
+    DocumentDetails:
+      type: object
+      properties:
+        id:
+          type: string
+        entityId:
+          type: string
+        entityType:
+          type: string
+        documentType:
+          type: string
+        documentSubType:
+          type: string
+        url:
+          type: string
+        documentName:
+          type: string
+        preSignedUrl:
+          type: string
+
+    NoteDetails:
+      type: object
+      properties:
+        id:
+          type: string
+        entityId:
+          type: string
+        entityType:
+          type: string
+        noteType:
+          type: string
+        noteSubType:
+          type: string
+        text:
+          type: string
+
+
+    SalesPersonReference:
+      type: object
+      properties:
+        salesPersonName:
+          type: string
+        salesPersonId:
+          type: string
+
+    PrincipalReference:
+      type: object
+      required: [principal, principalCode, principalId]
+      properties:
+        principal:
+          type: string
+          example: AMKA
+        principalCode:
+          type: string
+          example: PRP-001
+        customerPrincipalCode:
+          type: string
+          example: CUS-PRP-001
+        principalId:
+          type: number
+          example: 1
+
+    WarehouseReference:
+      type: object
+      required: [warehouseId]
+      properties:
+        warehouseId:
+          type: string
+          example: DOBRA
+
+    PaginationMetadata:
+      type: object
+      required:
+        - page
+        - pageSize
+        - totalItems
+        - totalPages
+        - hasNext
+        - hasPrevious
+      properties:
+        page:
+          type: integer
+          example: 1
+    
+        pageSize:
+          type: integer
+          example: 50
+    
+        totalItems:
+          type: integer
+          example: 527
+    
+        totalPages:
+          type: integer
+          example: 11
+
+
+    # Request schemas
+    CreateQuotationRequest:
+      type: object
+      required: [documentDate, customer, currencyCode, lines]
+      properties:
+        externalReferenceId:
+          type: string
+          maxLength: 100
+        sourceSystem:
+          type: string
+          enum: [OMS, ERP, MARKETPLACE, PORTAL]
+        documentDate:
+          type: string
+          format: date
+        dueDate:
+          type: string
+          format: date
+        validUntilDate:
+          type: string
+          format: date
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        billToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        shipToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        principal:
+          $ref: '#/components/schemas/PrincipalReference'
+        warehouse:
+          $ref: '#/components/schemas/WarehouseReference'
+        languageCode:
+          type: string
+          pattern: '^[a-z]{2}$'
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        salesperson:
+          $ref: '#/components/schemas/SalesPersonReference'
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/QuotationLineRequest'
+
+    QuotationLineRequest:
+      type: object
+      required: [sku, unitOfMeasure, quantity, unitPrice]
+      properties:
+        sku:
+          type: string
+          maxLength: 100
+        lineType:
+          type: string
+          enum: [ITEM, RESOURCE, CHARGE]
+          default: ITEM
+        unitOfMeasure:
+          type: string
+          maxLength: 10
+        customerUnitPrice:
+          type: number
+          format: decimal
+          minimum: 0
+        quantity:
+          type: number
+          format: decimal
+          minimum: 0.001
+
+    PatchQuotationRequest:
+      type: object
+      properties:
+        externalReferenceId:
+          type: string
+        dueDate:
+          type: string
+          format: date
+        validUntilDate:
+          type: string
+          format: date
+        salesperson:
+          $ref: '#/components/schemas/SalesPersonReference'
+        lines:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/QuotationLineRequest'
+              - type: object
+                properties:
+                  quotationLineId:
+                    type: string
+                  cancelled:
+                    type: boolean
+
+    DeleteQuotationRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    QuotationSearchRequest:
+      type: object
+      properties:
+        quotationCreationDateFrom:
+          type: string
+          format: date-time
+        quotationCreationDateTo:
+          type: string
+          format: date-time
+        customer:
+          type: string
+        customerBranch:
+          type: string
+        principal:
+          type: string
+        quotationStatuses:
+          type: array
+          items:
+            type: string
+        search:
+          type: string
+        businessUnit:
+          type: array
+          items:
+            type: string
+        warehouseId:
+          type: string
+
+    QuotationSearchResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            orders:
+              type: array
+              items:
+                $ref: '#/components/schemas/QuotationSummary'
+            pageDetails:
+              $ref: '#/components/schemas/PaginationMetadata'
+
+    QuotationSummary:
+      type: object
+      properties:
+        customerAccountName:
+          type: string
+        customerBranchName:
+          type: string
+        customerReference:
+          type: string
+        orderId:
+          type: string
+        quotationPlacedAt:
+          type: string
+          format: date-time
+        quotationStatus:
+          type: string
+        quotationTotalValue:
+          type: string
+        principal:
+          type: string
+
+    CreateOrderRequest:
+      type: object
+      required: [orderDate, customer, currencyCode, lines]
+      properties:
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        externalReferenceId:
+          type: string
+          maxLength: 100
+        sourceSystem:
+          type: string
+          enum: [OMS, ERP, MARKETPLACE, PORTAL]
+        documentDate:
+          type: string
+          format: date
+        orderType:
+          type: string
+          maxLength: 100
+        orderSubType:
+          type: string
+          maxLength: 100
+        sourceId:
+          type: string
+          enum: [SHOPIFY, BASE_LINKER]
+        channel:
+          type: string
+          enum: [TOP, SCS, SFS, API]
+        platform:
+          #Integration can be baselinker but order is from amazon platform
+          type: string
+          enum: [AMAZON, SCS, SFS, API]
+        billToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        shipToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        principal:
+          $ref: '#/components/schemas/PrincipalReference'
+        warehouse:
+          $ref: '#/components/schemas/WarehouseReference'
+        languageCode:
+          type: string
+          pattern: '^[a-z]{2}$'
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        salesperson:
+          $ref: '#/components/schemas/SalesPersonReference'
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderLineRequest'
+    
+    OrderLineRequest:
+      type: object
+      required: [sku, unitOfMeasure, quantity, unitPrice]
+      properties:
+        sku:
+          type: string
+          maxLength: 100
+        lineType:
+          type: string
+          enum: [ITEM, RESOURCE, CHARGE]
+          default: ITEM
+        unitOfMeasure:
+          type: string
+          maxLength: 10
+        customerUnitPrice:
+          type: number
+          format: decimal
+          minimum: 0
+        quantity:
+          type: number
+          format: decimal
+          minimum: 0.001
+
+    OrderSearchRequest:
+      type: object
+      properties:
+        orderCreationDateFrom:
+          type: string
+          format: date-time
+        orderCreationDateTo:
+          type: string
+          format: date-time
+        customer:
+          type: string
+        customerBranch:
+          type: string
+        principal:
+          type: string
+        orderStatuses:
+          type: array
+          items:
+            type: string
+        search:
+          type: string
+        adjusted:
+          type: boolean
+        invoiceNumber:
+          type: string
+        businessUnit:
+          type: array
+          items:
+            type: string
+        warehouseId:
+          type: string
+          
+    OrderSearchResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            orders:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrderSummary'
+            pageDetails:
+              $ref: '#/components/schemas/PaginationMetadata'
+
+    OrderSummary:
+      type: object
+      properties:
+        customerAccountName:
+          type: string
+        customerBranchName:
+          type: string
+        customerReference:
+          type: string
+        invoiceId:
+          type: string
+        isAdjusted:
+          type: boolean
+        orderId:
+          type: string
+        orderPlacedAt:
+          type: string
+          format: date-time
+        orderStatus:
+          type: string
+        orderTotalValue:
+          type: string
+        principal:
+          type: string
+        sourcePlatform:
+          type: string
+
+    UpdateOrderRequest:
+      type: object
+      properties:
+        lines:
+          type: array
+          items:
+            type: object
+
+    PatchOrderRequest:
+      type: object
+      properties:
+        requestedDeliveryDate:
+          type: string
+          format: date
+
+    CreateClaimRequest:
+      type: object
+      required: [claimType, customer, claimDate]
+      properties:
+        claimType:
+          type: string
+          enum: [DAMAGE, SHORTAGE, QUALITY, RETURN]
+        claimDate:
+          type: string
+          format: date
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        items:
+          type: array
+          items:
+            type: object
+
+    PatchClaimRequest:
+      type: object
+      properties:
+        description:
+          type: string
+
+    CreateClaimItemRequest:
+      type: object
+      required: [sku, quantity, unitPrice]
+      properties:
+        sku:
+          type: string
+        quantity:
+          type: number
+        unitPrice:
+          type: number
+
+    # Response schemas  
+
+    QuotationResponse:
+      type: object
+      required:
+        - tenantId
+        - buId
+        - quotationId
+        - status
+      properties:
+        tenantId:
+          type: string
+        buId:
+          type: string
+    
+        id:
+          type: integer
+          format: int64
+        quotationId:
+          type: string
+        status:
+          type: string
+
+    QuotationDetailsResponse:
+      type: object
+      required:
+        - tenantId
+        - buId
+        - quotationId
+        - documentDate
+        - status
+      properties:
+        tenantId:
+          type: string
+        buId:
+          type: string
+    
+        id:
+          type: integer
+          format: int64
+        quotationId:
+          type: string
+        externalReferenceId:
+          type: string
+    
+        documentDate:
+          type: string
+          format: date
+        dueDate:
+          type: string
+          format: date
+        validUntilDate:
+          type: string
+          format: date
+    
+        status:
+          type: string
+          enum: [DRAFT, SENT, ACCEPTED, EXPIRED, CANCELLED]
+    
+        currencyCode:
+          type: string
+        pricingMethod:
+          type: string
+          enum: [LIST, CONTRACT, MANUAL]
+    
+        customerReference:
+          $ref: '#/components/schemas/CustomerReference'
+    
+        billToAddressReference:
+          $ref: '#/components/schemas/AddressReference'
+        shipToAddressReference:
+          $ref: '#/components/schemas/AddressReference'
+    
+        totalAmountExcludingTax:
+          type: number
+        totalTaxAmount:
+          type: number
+        totalAmountIncludingTax:
+          type: number
+
+        lines:
+          type: object
+          description: Paginated quotation lines
+          required:
+            - items
+            - pagination
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/QuotationLineDetails'
+
+            pagination:
+              $ref: '#/components/schemas/PaginationMetadata'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentDetails'
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoteDetails'
+
+    QuotationLineDetails:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        quotationLineId:
+          type: string
+        sequence:
+          type: integer
+
+        skuId:
+          type: string
+        description:
+          type: string
+        quantity:
+          type: number
+        unitPrice:
+          type: number
+
+        taxReference:
+          $ref: '#/components/schemas/TaxReference'
+
+        principalReference:
+          $ref: '#/components/schemas/PrincipalReference'
+
+        priceListId:
+          type: string
+
+        amountExcludingTax:
+          type: number
+        totalTaxAmount:
+          type: number
+        amountIncludingTax:
+          type: number
+
+    TaxReference:
+      type: object
+      properties:
+        taxId:
+          type: string
+        taxCode:
+          type: string
+
+    OrderLinesDetailsResponse:
+      type: object
+      description: Complete order details with all related entities
+      properties:
+        data:
+          type: object
+          description: Paginated order lines
+          required:
+            - items
+            - pagination
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrderLineDetails'
+
+            pagination:
+              $ref: '#/components/schemas/PaginationMetadata'
+
+    QuotationLinesDetailsResponse:
+      type: object
+      description: Paginated quotation lines with all related entities
+      properties:
+        data:
+          type: object
+          description: Paginated quotation lines
+          required:
+            - items
+            - pagination
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/QuotationLineDetails'
+
+            pagination:
+              $ref: '#/components/schemas/PaginationMetadata'
+      
+
+
+    OrderDetailsResponse:
+      type: object
+      description: Complete order details with all related entities
+      properties:
+        # Base Entity Fields
+        tenantId:
+          type: string
+          example: CCTI
+        buId:
+          type: string
+          example: CCTIC000003
+        externalReferenceBuId:
+          type: string
+          example: BU-EXT-001
+        
+        # Order Header Identity
+        id:
+          type: integer
+          format: int64
+          example: 234567
+        orderId:
+          type: string
+          example: ORD-2025-001
+        externalReferenceId:
+          type: string
+          example: EXT-ORD-12345
+        sourceSystem:
+          type: string
+          example: MARKETPLACE
+        sourceId:
+          type: string
+          example: MKT-ORD-67890
+        sourceMeta:
+          type: object
+          additionalProperties: true
+        channel:
+          type: string
+          example: B2B_PORTAL
+        platform:
+          type: string
+          example: WEB
+        
+        # Dates
+        orderDate:
+          type: string
+          format: date
+          example: "2025-01-10"
+        postingDate:
+          type: string
+          format: date
+          example: "2025-01-11"
+        
+        # Customer (as reference)
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+        
+        # Addresses (as references)
+        billToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        shipToAddress:
+          $ref: '#/components/schemas/AddressReference'
+        
+        # Localization
+        languageCode:
+          type: string
+          example: en
+        locale:
+          type: string
+          example: en-AE
+        
+        # Order Type
+        orderTypeId:
+          type: integer
+          format: int64
+          example: 1001
+        orderType:
+          type: string
+          example: STANDARD
+        orderSubtype:
+          type: string
+          example: VAN_SALES
+        
+        # Fulfillment
+        isPartiallyFulfilled:
+          type: boolean
+          example: true
+        shipmentMethod:
+          type: string
+          example: DELIVERY
+        shippingOption:
+          type: string
+          example: STANDARD
+        decisionDate:
+          type: string
+          format: date
+          example: "2025-01-10"
+        partialShipping:
+          type: boolean
+          example: true
+        requestedDeliveryDate:
+          type: string
+          format: date
+          example: "2025-01-15"
+        expectedDeliveryDate:
+          type: string
+          format: date
+          example: "2025-01-16"
+        fullyShipped:
+          type: boolean
+          example: false
+        
+        # Status
+        statusId:
+          type: integer
+          format: int64
+          example: 3002
+        status:
+          type: string
+          example: PROCESSING
+        cancelReason:
+          type: string
+          nullable: true
+          example: null
+        lastModifiedDate:
+          type: string
+          format: date
+          example: "2025-01-12"
+        
+        # Financial
+        discountPercent:
+          type: number
+          format: decimal
+          example: 5.0
+        discountAmount:
+          type: number
+          format: decimal
+          example: 2500.00
+        totalAmountExcludingTax:
+          type: number
+          format: decimal
+          example: 47500.00
+        totalTaxAmount:
+          type: number
+          format: decimal
+          example: 2375.00
+        totalAmountIncludingTax:
+          type: number
+          format: decimal
+          example: 49875.00
+        grossProfit:
+          type: number
+          format: decimal
+          example: 9500.00
+        grossProfitIncludingTax:
+          type: number
+          format: decimal
+          example: 11875.00
+        grossProfitPercentage:
+          type: number
+          format: decimal
+          example: 20.0
+        
+        # Commercial
+        principalId:
+          type: string
+          example: PRIN-AMKA
+        principalCode:
+          type: string
+          example: AMKA
+        principalName:
+          type: string
+          example: AMKA Trading
+        externalReferencePrincipalId:
+          type: string
+          example: EXT-PRIN-001
+        customerPrincipalCode:
+          type: string
+          example: CUST-PRIN-001
+        
+        # Audit
+        priceValidationFailedTime:
+          type: integer
+          format: int64
+          nullable: true
+          example: null
+        totalItems:
+          type: integer
+          example: 2
+        completedAt:
+          type: string
+          format: date
+          nullable: true
+          example: null
+        
+        # Logistics
+        routeId:
+          type: string
+          example: ROUTE-001
+        routeName:
+          type: string
+          example: Dubai Zone 1
+        
+        # Currency
+        currencyCode:
+          type: string
+          example: AED
+        currencyFactor:
+          type: number
+          format: decimal
+          example: 1.0
+        
+        # Sales
+        salesperson:
+          type: string
+          example: SP-001
+        salespersonName:
+          type: string
+          example: John Sales
+        vanSalesInvoiceId:
+          type: string
+          nullable: true
+          example: null
+        
+        # Pricing
+        priceListId:
+          type: string
+          example: PL-STANDARD-2025
+        pricingMethod:
+          type: string
+          example: LIST
+        taxScheme:
+          type: string
+          example: VAT
+        taxInclusive:
+          type: boolean
+          example: false
+        
+        # Approval
+        approvalStatus:
+          type: string
+          example: APPROVED
+        approvedBy:
+          type: string
+          example: manager@dpworld.com
+        approvedDate:
+          type: string
+          format: date-time
+          example: "2025-01-10T10:00:00Z"
+        
+        # Posting
+        isPosted:
+          type: boolean
+          example: false
+        
+        # Warehouse
+        warehouseId:
+          type: string
+          example: WH-001
+        warehouseName:
+          type: string
+          example: Jebel Ali Warehouse
+        fulfillmentCenterType:
+          type: string
+          example: WAREHOUSE
+        shipmentType:
+          type: string
+          example: SHIP_TO_CUSTOMER
+
+        lines:
+          type: object
+          description: Paginated order lines
+          required:
+            - items
+            - pagination
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrderLineDetails'
+
+            pagination:
+              $ref: '#/components/schemas/PaginationMetadata'
+
+        # Summary
+        totalLines:
+          type: integer
+          example: 2
+        totalQuantity:
+          type: number
+          format: decimal
+          example: 150.0
+        totalWeight:
+          type: number
+          format: decimal
+          example: 150.0
+        totalVolume:
+          type: number
+          format: decimal
+          example: 6.3
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentDetails'
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoteDetails'
+
+    # ==========================================
+    # ORDER LINE ENTITY
+    # ==========================================
+    OrderLineDetails:
+      type: object
+      description: Complete order line item details
+      properties:
+        # Line Identity
+        id:
+          type: integer
+          format: int64
+          example: 345678
+        orderLineId:
+          type: string
+          example: OL-2025-001-001
+        sequence:
+          type: integer
+          example: 10
+        
+        # Product
+        skuId:
+          type: string
+          example: SKU-12345
+        externalReferenceId:
+          type: string
+          example: INV-789
+        lineType:
+          type: string
+          example: ITEM
+        barcode:
+          type: string
+          example: "1234567890123"
+        sourceHeaderId:
+          type: string
+          example: QT-2025-001
+        sourceLineNumber:
+          type: string
+          example: QTL-2025-001-001
+        serialNumber:
+          type: string
+          example: "IMEI1,IMEI2,IMEI3"
+        erpItemId:
+          type: string
+          example: ERP-ITEM-001
+        description:
+          type: string
+          example: Premium Widget Model X
+        sourceItemDesc:
+          type: string
+          example: Premium Widget X from Source
+        batch:
+          type: string
+          example: BATCH-2025-01
+        itemUrl:
+          type: string
+          example: https://catalog.dpworld.com/items/SKU-12345
+        
+        # Quantity
+        quantity:
+          type: number
+          format: decimal
+          example: 50.0
+        fulfilledQuantity:
+          type: number
+          format: decimal
+          example: 30.0
+        freeItem:
+          type: boolean
+          example: false
+        parentLineItemId:
+          type: integer
+          format: int64
+          nullable: true
+          example: null
+        sourceUom:
+          type: string
+          example: EA
+        packSize:
+          type: string
+          example: "1x50"
+        sourcePackSize:
+          type: string
+          example: "50 PACK"
+        sourceQuantity:
+          type: number
+          format: decimal
+          example: 50.0
+        
+        # Pricing
+        customerPrice:
+          type: number
+          format: decimal
+          example: 500.00
+        sourcePriceExclVat:
+          type: number
+          format: decimal
+          example: 475.00
+        sourcePriceInclVat:
+          type: number
+          format: decimal
+          example: 500.00
+        discountedValue:
+          type: number
+          format: decimal
+          example: 1250.00
+        
+        # Discounts
+        principalPromotionDiscount:
+          type: number
+          format: decimal
+          example: 2.0
+        principalSwellDiscount:
+          type: number
+          format: decimal
+          example: 1.5
+        principalTradeDiscount:
+          type: number
+          format: decimal
+          example: 1.0
+        agencySwellDiscount:
+          type: number
+          format: decimal
+          example: 0.5
+        agencyTradeDiscount:
+          type: number
+          format: decimal
+          example: 0.3
+        agencySwellDiscountAmount:
+          type: number
+          format: decimal
+          example: 125.00
+        principalSwellDiscountAmount:
+          type: number
+          format: decimal
+          example: 375.00
+        
+        # Lifecycle
+        requestedExpiryStartDate:
+          type: string
+          format: date
+          example: "2025-06-01"
+        requestedExpiryEndDate:
+          type: string
+          format: date
+          example: "2026-06-01"
+        
+        # Status
+        status:
+          type: string
+          example: PROCESSING
+        statusId:
+          type: integer
+          format: int64
+          example: 3002
+        cancelComment:
+          type: string
+          nullable: true
+          example: null
+        adjustmentReason:
+          type: string
+          nullable: true
+          example: null
+        
+        # Promotion
+        dealId:
+          type: string
+          example: DEAL-001
+        dealType:
+          type: string
+          example: BUNDLE
+        dealCategory:
+          type: string
+          example: SEASONAL
+        dealLevel:
+          type: string
+          example: LINE
+        swellDealId:
+          type: string
+          example: SWELL-001
+        
+        # Fulfillment
+        isItemMiissing:
+          type: boolean
+          example: false
+        lineObjectNumber:
+          type: string
+          example: LINE-001
+        
+        # Unit Details
+        unitOfMeasure:
+          type: string
+          example: EA
+        unitPrice:
+          type: number
+          format: decimal
+          example: 500.00
+        costPrice:
+          type: number
+          format: decimal
+          example: 380.00
+        discountPercent:
+          type: number
+          format: decimal
+          example: 5.0
+        discountAppliedBeforeTax:
+          type: boolean
+          example: true
+        discountAmount:
+          type: number
+          format: decimal
+          example: 1250.00
+        
+        # Tax
+        amountExcludingTax:
+          type: number
+          format: decimal
+          example: 23750.00
+        taxId:
+          type: string
+          example: TAX-VAT-5
+        taxCode:
+          type: string
+          example: VAT-5
+        taxPercent:
+          type: number
+          format: decimal
+          example: 5.0
+        totalTaxAmount:
+          type: number
+          format: decimal
+          example: 1187.50
+        amountIncludingTax:
+          type: number
+          format: decimal
+          example: 24937.50
+        
+        # Net Amounts
+        netAmount:
+          type: number
+          format: decimal
+          example: 23750.00
+        netTaxAmount:
+          type: number
+          format: decimal
+          example: 1187.50
+        netAmountIncludingTax:
+          type: number
+          format: decimal
+          example: 24937.50
+        
+        # Location
+        locationId:
+          type: string
+          example: WH-001
+        
+        # Commercial
+        principalId:
+          type: string
+          example: PRIN-AMKA
+        principalCode:
+          type: string
+          example: AMKA
+        principalName:
+          type: string
+          example: AMKA Trading
+        
+        # Profit
+        grossProfit:
+          type: number
+          format: decimal
+          example: 6000.00
+        grossProfitIncludingTax:
+          type: number
+          format: decimal
+          example: 6300.00
+        grossProfitPercentage:
+          type: number
+          format: decimal
+          example: 25.26
+        
+        # Posting
+        postingDate:
+          type: string
+          format: date
+          example: "2025-01-11"
+        isPosted:
+          type: boolean
+          example: false
+        
+        # Currency
+        currencyCode:
+          type: string
+          example: AED
+        currencyFactor:
+          type: number
+          format: decimal
+          example: 1.0
+        
+        # Expiry
+        expiryDate:
+          type: string
+          format: date
+          example: "2026-06-01"
+        
+        # Pricing
+        priceListId:
+          type: string
+          example: PL-STANDARD-2025
+        pricingMethod:
+          type: string
+          example: LIST
+        taxExemptFlag:
+          type: boolean
+          example: false
+        
+        # Localization
+        languageCode:
+          type: string
+          example: en
+        locale:
+          type: string
+          example: en-AE
+        
+        # Dimensions
+        height:
+          type: number
+          format: decimal
+          example: 10.5
+        width:
+          type: number
+          format: decimal
+          example: 15.0
+        length:
+          type: number
+          format: decimal
+          example: 20.0
+        weight:
+          type: number
+          format: decimal
+          example: 2.5
+        volume:
+          type: number
+          format: decimal
+          example: 3.15
+        
+        # Shipping
+        shipmentMethod:
+          type: string
+          example: DELIVERY
+        shippingOption:
+          type: string
+          example: STANDARD
+        warehouseId:
+          type: string
+          example: WH-001
+        warehouseName:
+          type: string
+          example: Jebel Ali Warehouse
+        fulfillmentCenterType:
+          type: string
+          example: WAREHOUSE
+        shipmentType:
+          type: string
+          example: SHIP_TO_CUSTOMER
+        
+        # Carrier
+        carrierCode:
+          type: string
+          example: DHL
+        carrierName:
+          type: string
+          example: DHL Express
+        serviceLevel:
+          type: string
+          example: STANDARD
+        shippingMethod:
+          type: string
+          example: GROUND  
+    
+    OrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        status:
+          type: string
+
+    ClaimResponse:
+      type: object
+      properties:
+        claimId:
+          type: string
+        status:
+          type: string
+        customer:
+          $ref: '#/components/schemas/CustomerReference'
+
+    ClaimItemResponse:
+      type: object
+      properties:
+        claimItemId:
+          type: string
+        sku:
+          type: string
+        quantity:
+          type: number
+
+    WorkflowSuccessResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        workflowId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    ConvertToOrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        quotationId:
+          type: string
+        status:
+          type: string
+
+    RecalculatePricesResponse:
+      type: object
+      description: Complete order details with all related entities
+      properties:
+        sourceSystem:
+          type: string
+          example: MARKETPLACE
+        sourceId:
+          type: string
+          example: MKT-ORD-67890
+        sourceMeta:
+          type: object
+          additionalProperties: true
+        channel:
+          type: string
+          example: B2B_PORTAL
+        platform:
+          type: string
+          example: WEB
+        # Localization
+        languageCode:
+          type: string
+          example: en
+        locale:
+          type: string
+          example: en-AE
+        
+        # Order Type
+        orderTypeId:
+          type: integer
+          format: int64
+          example: 1001
+        orderType:
+          type: string
+          example: STANDARD
+        orderSubtype:
+          type: string
+          example: VAN_SALES
+        # Financial
+        discountPercent:
+          type: number
+          format: decimal
+          example: 5.0
+        discountAmount:
+          type: number
+          format: decimal
+          example: 2500.00
+        totalAmountExcludingTax:
+          type: number
+          format: decimal
+          example: 47500.00
+        totalTaxAmount:
+          type: number
+          format: decimal
+          example: 2375.00
+        totalAmountIncludingTax:
+          type: number
+          format: decimal
+          example: 49875.00
+        grossProfit:
+          type: number
+          format: decimal
+          example: 9500.00
+        grossProfitIncludingTax:
+          type: number
+          format: decimal
+          example: 11875.00
+        grossProfitPercentage:
+          type: number
+          format: decimal
+          example: 20.0
+        
+        # Currency
+        currencyCode:
+          type: string
+          example: AED
+        currencyFactor:
+          type: number
+          format: decimal
+          example: 1.0
+        
+        # Pricing
+        priceListId:
+          type: string
+          example: PL-STANDARD-2025
+        pricingMethod:
+          type: string
+          example: LIST
+        taxScheme:
+          type: string
+          example: VAT
+        taxInclusive:
+          type: boolean
+          example: false
+        
+        
+        lines:
+          type: object
+          description: Paginated order lines
+          required:
+            - items
+            - pagination
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CalculatePricesLineDetails'
+
+        # Summary
+        totalLines:
+          type: integer
+          example: 2
+        totalQuantity:
+          type: number
+          format: decimal
+          example: 150.0
+        totalWeight:
+          type: number
+          format: decimal
+          example: 150.0
+        totalVolume:
+          type: number
+          format: decimal
+          example: 6.3
+
+
+    CalculatePricesLineDetails:
+      type: object
+      description: Complete order line item details
+      properties:  
+        # Product
+        skuId:
+          type: string
+          example: SKU-12345
+        externalReferenceId:
+          type: string
+          example: INV-789
+        lineType:
+          type: string
+          example: ITEM
+        barcode:
+          type: string
+          example: "1234567890123"
+        sourceHeaderId:
+          type: string
+          example: QT-2025-001
+        sourceLineNumber:
+          type: string
+          example: QTL-2025-001-001
+        serialNumber:
+          type: string
+          example: "IMEI1,IMEI2,IMEI3"
+        batch:
+          type: string
+          example: BATCH-2025-01
+        # Quantity
+        quantity:
+          type: number
+          format: decimal
+          example: 50.0
+        freeItem:
+          type: boolean
+          example: false
+        packSize:
+          type: string
+          example: "1x50"
+        # Pricing
+        customerPrice:
+          type: number
+          format: decimal
+          example: 500.0
+        discountedValue:
+          type: number
+          format: decimal
+          example: 1250.00
+        
+        # Discounts
+        principalPromotionDiscount:
+          type: number
+          format: decimal
+          example: 2.0
+        principalSwellDiscount:
+          type: number
+          format: decimal
+          example: 1.5
+        principalTradeDiscount:
+          type: number
+          format: decimal
+          example: 1.0
+        agencySwellDiscount:
+          type: number
+          format: decimal
+          example: 0.5
+        agencyTradeDiscount:
+          type: number
+          format: decimal
+          example: 0.3
+        agencySwellDiscountAmount:
+          type: number
+          format: decimal
+          example: 125.00
+        principalSwellDiscountAmount:
+          type: number
+          format: decimal
+          example: 375.00
+        
+        # Promotion
+        dealId:
+          type: string
+          example: DEAL-001
+        dealType:
+          type: string
+          example: BUNDLE
+        dealCategory:
+          type: string
+          example: SEASONAL
+        dealLevel:
+          type: string
+          example: LINE
+        swellDealId:
+          type: string
+          example: SWELL-001
+        
+        # Unit Details
+        unitOfMeasure:
+          type: string
+          example: EA
+        unitPrice:
+          type: number
+          format: decimal
+          example: 500.00
+        costPrice:
+          type: number
+          format: decimal
+          example: 380.00
+        discountPercent:
+          type: number
+          format: decimal
+          example: 5.0
+        discountAppliedBeforeTax:
+          type: boolean
+          example: true
+        discountAmount:
+          type: number
+          format: decimal
+          example: 1250.00
+        
+        # Tax
+        amountExcludingTax:
+          type: number
+          format: decimal
+          example: 23750.00
+        taxId:
+          type: string
+          example: TAX-VAT-5
+        taxCode:
+          type: string
+          example: VAT-5
+        taxPercent:
+          type: number
+          format: decimal
+          example: 5.0
+        totalTaxAmount:
+          type: number
+          format: decimal
+          example: 1187.50
+        amountIncludingTax:
+          type: number
+          format: decimal
+          example: 24937.50
+        
+        # Net Amounts
+        netAmount:
+          type: number
+          format: decimal
+          example: 23750.00
+        netTaxAmount:
+          type: number
+          format: decimal
+          example: 1187.50
+        netAmountIncludingTax:
+          type: number
+          format: decimal
+          example: 24937.50
+        
+        # Commercial
+        principalId:
+          type: string
+          example: PRIN-AMKA
+        principalCode:
+          type: string
+          example: AMKA
+        principalName:
+          type: string
+          example: AMKA Trading
+        
+        # Profit
+        grossProfit:
+          type: number
+          format: decimal
+          example: 6000.00
+        grossProfitIncludingTax:
+          type: number
+          format: decimal
+          example: 6300.00
+        grossProfitPercentage:
+          type: number
+          format: decimal
+          example: 25.26
+        
+        # Currency
+        currencyCode:
+          type: string
+          example: AED
+        currencyFactor:
+          type: number
+          format: decimal
+          example: 1.0
+        
+        # Expiry
+        expiryDate:
+          type: string
+          format: date
+          example: "2026-06-01"
+        
+        # Pricing
+        priceListId:
+          type: string
+          example: PL-STANDARD-2025
+        pricingMethod:
+          type: string
+          example: LIST
+        taxExemptFlag:
+          type: boolean
+          example: false
+        
+        # Localization
+        languageCode:
+          type: string
+          example: en
+        locale:
+          type: string
+          example: en-AE
+        
+    RecalculateTotalsResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        status:
+          type: number
+
+    GrvResponse:
+      type: object
+      properties:
+        grvId:
+          type: string
+        grvNumber:
+          type: string
+        status:
+          type: string
+
+    QualityCheckResponse:
+      type: object
+      properties:
+        qcId:
+          type: string
+        qcStatus:
+          type: string
+
+    TripAssignmentResponse:
+      type: object
+      properties:
+        tripId:
+          type: string
+        status:
+          type: string
+
+    ApprovalResponse:
+      type: object
+      properties:
+        claimId:
+          type: string
+        approvalDecision:
+          type: string
+
+    AccountingClearanceResponse:
+      type: object
+      properties:
+        claimId:
+          type: string
+        clearanceStatus:
+          type: string
+
+    BulkUploadResponse:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        status:
+          type: string
+
+    BulkUploadStatusResponse:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        status:
+          type: string
+        totalRecords:
+          type: integer
+        processedRecords:
+          type: integer
+
+    DocumentUploadResponse:
+      type: object
+      properties:
+        documentId:
+          type: string
+        fileName:
+          type: string
+
+    AsyncOperationResponse:
+      type: object
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+
+    AsyncOperationStatusResponse:
+      type: object
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+
+    WebhookAcknowledgment:
+      type: object
+      properties:
+        eventId:
+          type: string
+        status:
+          type: string
+
+    StatusUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        status:
+          type: string
+
+    SuccessResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: integer
+        error:
+          type: string
+        message:
+          type: string
+
+    ValidationErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            errors:
+              type: array
+              items:
+                type: object
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    ValidationError:
+      description: Validation Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+    
+    InternalServerError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
